@@ -68,6 +68,133 @@ describe('KanbanView Initialization', () => {
 		controller.app = app;
 	});
 
+	test('columns can be collapsed and expanded with persisted state', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+		controller.config.set('collapsedColumns', { [PROPERTY_STATUS]: ['To Do'] });
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const column = Array.from(view.containerEl.querySelectorAll<HTMLElement>('.obk-column')).find(
+			(element) => element.getAttribute('data-column-value') === 'To Do',
+		);
+		assert.ok(column?.classList.contains(CSS_CLASSES.COLUMN_COLLAPSED));
+		const toggle = column?.querySelector<HTMLElement>('.obk-column-toggle');
+		assert.strictEqual(toggle?.getAttribute('aria-label'), 'Expand column');
+
+		toggle?.click();
+		assert.ok(!column?.classList.contains(CSS_CLASSES.COLUMN_COLLAPSED));
+		const saved = controller.config.get('collapsedColumns') as Record<string, string[]>;
+		assert.deepStrictEqual(saved[PROPERTY_STATUS], []);
+	});
+
+	test('wikilink column labels are displayed without brackets', () => {
+		const propertyId = PROPERTY_STATUS as BasesPropertyId;
+		const entries = [createMockBasesEntry(createMockTFile('Sprint task.md'), { [propertyId]: '[[Sprint 151]]' })];
+		controller = createMockQueryController(entries, [propertyId]);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => propertyId;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-column-title')?.textContent, 'Sprint 151');
+	});
+
+	test('column color controls are not rendered', () => {
+		const entries = createEntriesWithStatus();
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = () => PROPERTY_STATUS;
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		assert.strictEqual(view.containerEl.querySelector('.obk-column-color-btn'), null);
+	});
+
+	test('renders inner groups inside columns in configured order', () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Project A.md'), {
+				[PROPERTY_STATUS]: 'Sprint 152',
+				[PROPERTY_PRIORITY]: 'uat',
+			}),
+			createMockBasesEntry(createMockTFile('Project B.md'), {
+				[PROPERTY_STATUS]: 'Sprint 152',
+				[PROPERTY_PRIORITY]: 'current',
+			}),
+		];
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) =>
+			key === 'groupByProperty' ? PROPERTY_STATUS : key === 'swimlaneByProperty' ? PROPERTY_PRIORITY : null;
+		controller.config.set('groupOrder', 'current, ready-for-dev, uat');
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const column = view.containerEl.querySelector<HTMLElement>('[data-column-value="Sprint 152"]');
+		assert.ok(column);
+		const groups = Array.from(column.querySelectorAll('.obk-column-group-title')).map((group) => group.textContent);
+		assert.deepStrictEqual(groups, ['current1', 'ready-for-dev0', 'uat1']);
+		assert.ok(
+			column.querySelector('[data-inner-group-value="ready-for-dev"] [data-sortable-container]'),
+			'Empty configured groups should still expose a drop target',
+		);
+		assert.strictEqual(view.containerEl.querySelectorAll('.obk-swimlane').length, 0);
+	});
+
+	test('moving into an empty destination group preserves the group property', async () => {
+		const entries = [
+			createMockBasesEntry(createMockTFile('Payroll support task emails.md'), {
+				[PROPERTY_STATUS]: 'Sprint 154',
+				[PROPERTY_PRIORITY]: 'ready-for-dev',
+			}),
+			createMockBasesEntry(createMockTFile('Existing Sprint 155 task.md'), {
+				[PROPERTY_STATUS]: 'Sprint 155',
+				[PROPERTY_PRIORITY]: 'backlog',
+			}),
+		];
+		controller = createMockQueryController(entries, TEST_PROPERTIES);
+		controller.app = app;
+		controller.config.getAsPropertyId = (key: string) =>
+			key === 'groupByProperty' ? PROPERTY_STATUS : key === 'swimlaneByProperty' ? PROPERTY_PRIORITY : null;
+		controller.config.set('groupOrder', 'backlog, ready-for-dev');
+
+		const view = new KanbanView(controller, scrollEl);
+		setupKanbanViewWithApp(view, app);
+		triggerDataUpdate(view);
+
+		const sourceGroup = view.containerEl.querySelector<HTMLElement>(
+			'[data-column-value="Sprint 154"] [data-inner-group-value="ready-for-dev"]',
+		);
+		const destinationGroup = view.containerEl.querySelector<HTMLElement>(
+			'[data-column-value="Sprint 155"] [data-inner-group-value="ready-for-dev"]',
+		);
+		assert.ok(sourceGroup);
+		assert.ok(destinationGroup, 'The empty destination group should be rendered');
+
+		const card = sourceGroup.querySelector<HTMLElement>('.obk-card');
+		const sourceBody = sourceGroup.querySelector<HTMLElement>('[data-sortable-container]');
+		const destinationBody = destinationGroup.querySelector<HTMLElement>('[data-sortable-container]');
+		assert.ok(card && sourceBody && destinationBody);
+
+		await (view as any).handleCardDrop({ item: card, from: sourceBody, to: destinationBody, oldIndex: 0, newIndex: 0 });
+
+		assert.strictEqual(app.fileManager.processFrontMatter.calls.length, 1);
+		const [, update] = app.fileManager.processFrontMatter.calls[0];
+		const frontmatter = { status: 'Sprint 154', priority: 'ready-for-dev' };
+		await update(frontmatter);
+		assert.deepStrictEqual(frontmatter, { status: 'Sprint 155', priority: 'ready-for-dev' });
+	});
+
 	test('Constructor initializes correctly', () => {
 		const view = new KanbanView(controller, scrollEl);
 		setupKanbanViewWithApp(view, app);
@@ -849,18 +976,9 @@ describe('Data Rendering - Card Rendering', () => {
 		const entryPath = card.getAttribute('data-entry-path');
 		card.click();
 
-		// Verify openLinkText was called in current leaf
 		assert.strictEqual(app.workspace.openLinkText.calls.length, 1, 'openLinkText should be called');
-		assert.strictEqual(
-			app.workspace.openLinkText.calls[0][0],
-			entryPath,
-			'openLinkText should be called with entry path',
-		);
-		assert.strictEqual(
-			app.workspace.openLinkText.calls[0][2],
-			false,
-			'openLinkText should open in current leaf without modifier',
-		);
+		assert.strictEqual(app.workspace.openLinkText.calls[0][0], entryPath, 'openLinkText should receive the card path');
+		assert.strictEqual(app.workspace.openLinkText.calls[0][2], false, 'openLinkText should use the current leaf');
 	});
 
 	test('Ctrl+click on card opens file in new leaf', () => {
@@ -2180,7 +2298,7 @@ describe('Data Rendering - Card Properties', () => {
 	});
 });
 
-describe('Column Colors', () => {
+describe('Column collapse and labels', () => {
 	let scrollEl: HTMLElement;
 	let controller: any;
 	let app: any;
@@ -2192,7 +2310,7 @@ describe('Column Colors', () => {
 		controller.app = app;
 	});
 
-	test('color picker button is rendered in each column header', () => {
+	test.skip('color picker button is rendered in each column header', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -2210,7 +2328,7 @@ describe('Column Colors', () => {
 		});
 	});
 
-	test('column renders with accent color CSS variable when color is set', () => {
+	test.skip('column renders with accent color CSS variable when color is set', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -2268,7 +2386,7 @@ describe('Column Colors', () => {
 		});
 	});
 
-	test('color picker button has accessible aria-label', () => {
+	test.skip('color picker button has accessible aria-label', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -2289,7 +2407,7 @@ describe('Column Colors', () => {
 		});
 	});
 
-	test('clicking a color swatch applies color and calls saveColumnColor', async () => {
+	test.skip('clicking a color swatch applies color and calls saveColumnColor', async () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -2343,7 +2461,7 @@ describe('Column Colors', () => {
 		assert.strictEqual(savedColors?.[PROPERTY_STATUS]?.['To Do'], swatchTitle, 'saveColumnColor should have been called');
 	});
 
-	test('color picker button reflects current column color via inline style', () => {
+	test.skip('color picker button reflects current column color via inline style', () => {
 		const entries = createEntriesWithStatus();
 		controller = createMockQueryController(entries, TEST_PROPERTIES);
 		controller.app = app;
@@ -2410,7 +2528,7 @@ describe('Legacy Data Migration', () => {
 		);
 	});
 
-	test('migrates column colors from legacy data on first render', () => {
+	test.skip('migrates column colors from legacy data on first render', () => {
 		const legacyData = {
 			columnOrders: {},
 			columnColors: { [PROPERTY_STATUS]: { 'To Do': 'red', Done: 'green' } },
@@ -2582,7 +2700,7 @@ describe('Internal Link Click Handling', () => {
 		assert.strictEqual(
 			app.workspace.openLinkText.calls[0][0],
 			'notes/Task A.md',
-			'Clicking card body should open the card note',
+			'openLinkText should receive the card path',
 		);
 	});
 

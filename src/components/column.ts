@@ -1,42 +1,34 @@
 import type { BasesEntry } from 'obsidian';
-import { COLOR_PALETTE, CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
+import { setIcon } from 'obsidian';
+import { CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
 import { createCard, computeCardFingerprint, type CardRenderCtx, type CardCallbacks } from './card.ts';
+import { isListPropertyValue } from '../utils/grouping.ts';
 
 export interface ColumnRenderCtx {
 	doc: Document;
 	card: CardRenderCtx;
 	cardCb: CardCallbacks;
-	prefs: { columnColors: Record<string, string> };
+	prefs: { collapsedColumns: Set<string> };
+	nestedGroups: Map<string, Map<string, BasesEntry[]>> | null;
+	// All status/group values seen on the board, including configured values that
+	// currently have no cards. Empty groups still need a sortable body so cards
+	// can be moved into a sprint without changing their status.
+	groupValues: string[];
+	groupOrder: string[];
 	dragging: boolean;
 	cardFingerprints: Map<string, string>;
 	// Column values that are empty across the whole board (every swimlane). These
 	// persist only because they're saved in columnOrder, so they get a remove
 	// button. Board-wide, so it can't be derived from a single column's entries.
 	globallyEmptyColumns: Set<string>;
+	getColumnSubtitle: (columnValue: string) => string | null;
 }
 
 export interface ColumnCallbacks {
-	applyColumnColor: (columnEl: HTMLElement, colorName: string | null) => void;
-	onColorPickerClick: (anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string) => void;
+	onToggleCollapsed: (columnValue: string, columnEl: HTMLElement, toggleBtn: HTMLElement) => void;
 	onRemoveColumn: (columnValue: string, columnEl: HTMLElement) => void;
 	createAddButton: (columnValue: string, swimlaneValue: string | null) => HTMLElement;
 	getQuickAddFolder: () => string | null;
-}
-
-export function applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
-	if (!colorName) {
-		columnEl.style.removeProperty('--obk-column-accent-color');
-		columnEl.removeAttribute(DATA_ATTRIBUTES.COLUMN_COLOR);
-		return;
-	}
-	const cssVar = COLOR_PALETTE.find((c) => c.name === colorName)?.cssVar ?? null;
-	if (!cssVar) {
-		columnEl.style.removeProperty('--obk-column-accent-color');
-		columnEl.removeAttribute(DATA_ATTRIBUTES.COLUMN_COLOR);
-		return;
-	}
-	columnEl.style.setProperty('--obk-column-accent-color', cssVar);
-	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_COLOR, colorName);
 }
 
 export function createRemoveButton(doc: Document, value: string, onRemove: () => void): HTMLElement {
@@ -52,6 +44,14 @@ export function createRemoveButton(doc: Document, value: string, onRemove: () =>
 	return btn;
 }
 
+export function updateColumnToggle(toggleBtn: HTMLElement, isCollapsed: boolean): void {
+	toggleBtn.empty();
+	setIcon(toggleBtn, isCollapsed ? 'chevron-right' : 'chevron-down');
+	toggleBtn.setAttribute('aria-label', isCollapsed ? 'Expand column' : 'Collapse column');
+	toggleBtn.setAttribute('title', isCollapsed ? 'Expand column' : 'Collapse column');
+	toggleBtn.setAttribute('aria-expanded', String(!isCollapsed));
+}
+
 export function createColumn(
 	value: string,
 	entries: BasesEntry[],
@@ -62,24 +62,28 @@ export function createColumn(
 	const columnEl = ctx.doc.createElement('div');
 	columnEl.className = CSS_CLASSES.COLUMN;
 	columnEl.setAttribute(DATA_ATTRIBUTES.COLUMN_VALUE, value);
-
-	const colorName = ctx.prefs.columnColors[value] ?? null;
-	cb.applyColumnColor(columnEl, colorName);
+	const isCollapsed = ctx.prefs.collapsedColumns.has(value);
+	if (isCollapsed) columnEl.classList.add(CSS_CLASSES.COLUMN_COLLAPSED);
 
 	const headerEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_HEADER });
 
 	const dragHandle = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_DRAG_HANDLE });
 	dragHandle.textContent = '⋮⋮';
 
-	const colorBtn = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_COLOR_BTN });
-	colorBtn.setAttribute('aria-label', `Set color for column: ${value}`);
-	colorBtn.setAttribute('role', 'button');
-	colorBtn.addEventListener('click', (e) => {
+	const toggleBtn = headerEl.createEl('button', {
+		cls: CSS_CLASSES.COLUMN_TOGGLE,
+		attr: { type: 'button' },
+	});
+	updateColumnToggle(toggleBtn, isCollapsed);
+	toggleBtn.addEventListener('click', (e) => {
 		e.stopPropagation();
-		cb.onColorPickerClick(colorBtn, columnEl, value);
+		cb.onToggleCollapsed(value, columnEl, toggleBtn);
 	});
 
-	headerEl.createSpan({ text: value, cls: CSS_CLASSES.COLUMN_TITLE });
+	const headingEl = headerEl.createDiv({ cls: CSS_CLASSES.COLUMN_HEADING });
+	headingEl.createSpan({ text: formatColumnLabel(value), cls: CSS_CLASSES.COLUMN_TITLE });
+	const subtitle = ctx.getColumnSubtitle(value);
+	if (subtitle) headingEl.createSpan({ text: `Starts ${subtitle}`, cls: CSS_CLASSES.COLUMN_SUBTITLE });
 	headerEl.createSpan({ text: `${entries.length}`, cls: CSS_CLASSES.COLUMN_COUNT });
 
 	if (cb.getQuickAddFolder()) {
@@ -90,14 +94,55 @@ export function createColumn(
 		headerEl.appendChild(createRemoveButton(ctx.doc, value, () => cb.onRemoveColumn(value, columnEl)));
 	}
 
-	const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
-	bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
-
-	entries.forEach((entry) => {
-		bodyEl.appendChild(createCard(entry, ctx.card, ctx.cardCb));
-	});
+	const groups = ctx.nestedGroups ? (ctx.nestedGroups.get(value) ?? new Map<string, BasesEntry[]>()) : null;
+	if (groups) {
+		const liveGroups = [...new Set([...groups.keys(), ...ctx.groupValues])];
+		const orderedGroups = [
+			...ctx.groupOrder.filter((group) => liveGroups.includes(group)),
+			...liveGroups.filter((group) => !ctx.groupOrder.includes(group)),
+		];
+		orderedGroups.forEach((groupValue) => {
+			const groupEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_GROUP });
+			groupEl.setAttribute(DATA_ATTRIBUTES.INNER_GROUP_VALUE, groupValue);
+			const groupHeader = groupEl.createDiv({ cls: CSS_CLASSES.COLUMN_GROUP_TITLE });
+			groupHeader.createSpan({ text: formatColumnLabel(groupValue) });
+			groupHeader.createSpan({ text: `${groups.get(groupValue)?.length ?? 0}`, cls: CSS_CLASSES.COLUMN_GROUP_COUNT });
+			const groupBody = groupEl.createDiv({ cls: `${CSS_CLASSES.COLUMN_BODY} ${CSS_CLASSES.COLUMN_GROUP_BODY}` });
+			groupBody.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
+			(groups.get(groupValue) ?? []).forEach((entry) => {
+				groupBody.appendChild(
+					createCard(
+						entry,
+						ctx.card,
+						ctx.cardCb,
+						value,
+						ctx.card.groupByPropertyId !== null && isListPropertyValue(entry.getValue(ctx.card.groupByPropertyId)),
+					),
+				);
+			});
+		});
+	} else {
+		const bodyEl = columnEl.createDiv({ cls: CSS_CLASSES.COLUMN_BODY });
+		bodyEl.setAttribute(DATA_ATTRIBUTES.SORTABLE_CONTAINER, 'true');
+		entries.forEach((entry) => {
+			bodyEl.appendChild(
+				createCard(
+					entry,
+					ctx.card,
+					ctx.cardCb,
+					value,
+					ctx.card.groupByPropertyId !== null && isListPropertyValue(entry.getValue(ctx.card.groupByPropertyId)),
+				),
+			);
+		});
+	}
 
 	return columnEl;
+}
+
+export function formatColumnLabel(value: string): string {
+	const match = value.match(/^\[\[([^\]|#]+)(?:\|([^\]]+))?(?:#[^\]]+)?\]\]$/);
+	return match ? (match[2] ?? match[1]).trim() : value;
 }
 
 export function patchColumnCards(
@@ -136,9 +181,11 @@ export function patchColumnCards(
 	}
 
 	const newPaths = new Set(newEntries.map((e) => e.file.path));
+	const seenPaths = new Set<string>();
 	body.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.CARD}`).forEach((card) => {
 		const path = card.getAttribute(DATA_ATTRIBUTES.ENTRY_PATH);
-		if (path && !newPaths.has(path)) card.remove();
+		if (!path || !newPaths.has(path) || seenPaths.has(path)) card.remove();
+		else seenPaths.add(path);
 	});
 
 	const existingCards = new Map<string, HTMLElement>();
@@ -148,12 +195,19 @@ export function patchColumnCards(
 	});
 	newEntries.forEach((entry) => {
 		const fp = computeCardFingerprint(entry, ctx.card);
+		const fingerprintKey = `${entry.file.path}\u0000${columnValue ?? ''}`;
 		const existing = existingCards.get(entry.file.path);
-		if (existing && ctx.cardFingerprints.get(entry.file.path) === fp) {
+		if (existing && ctx.cardFingerprints.get(fingerprintKey) === fp) {
 			return;
 		}
-		const newCard = createCard(entry, ctx.card, ctx.cardCb);
-		ctx.cardFingerprints.set(entry.file.path, fp);
+		const newCard = createCard(
+			entry,
+			ctx.card,
+			ctx.cardCb,
+			columnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE) ?? '',
+			ctx.card.groupByPropertyId !== null && isListPropertyValue(entry.getValue(ctx.card.groupByPropertyId)),
+		);
+		ctx.cardFingerprints.set(fingerprintKey, fp);
 		if (existing) {
 			body.replaceChild(newCard, existing);
 		} else {

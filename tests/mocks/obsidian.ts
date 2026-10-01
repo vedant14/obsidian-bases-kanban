@@ -41,6 +41,10 @@ export interface QueryController {
 }
 
 export interface App {
+	metadataCache: {
+		getFirstLinkpathDest(linkpath: string, sourcePath: string): TFile | null;
+		getCache(path: string): { frontmatter?: Record<string, unknown> } | null;
+	};
 	workspace: {
 		openLinkText(path: string, source: string, newLeaf: boolean, openViewState?: { active?: boolean }): void;
 		getLeaf(newLeaf?: 'tab' | 'split' | 'window' | boolean): {

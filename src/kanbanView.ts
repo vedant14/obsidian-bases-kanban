@@ -1,5 +1,5 @@
 import type { BasesEntry, BasesPropertyId, HoverPopover, QueryController, ViewOption } from 'obsidian';
-import { BasesView, Keymap, Notice, normalizePath, parsePropertyId } from 'obsidian';
+import { BasesView, Keymap, Notice, normalizePath, parsePropertyId, TFile } from 'obsidian';
 import {
 	createCard as createCardEl,
 	computeCardFingerprint,
@@ -14,9 +14,9 @@ import {
 	type QuickAddCallbacks,
 } from './components/quickAdd.ts';
 import {
-	applyColumnColor as applyColumnColorEl,
 	createColumn as createColumnEl,
 	patchColumnCards as patchColumnCardsEl,
+	updateColumnToggle as updateColumnToggleEl,
 	type ColumnRenderCtx,
 	type ColumnCallbacks,
 } from './components/column.ts';
@@ -28,10 +28,8 @@ import {
 	type RowRenderCtx,
 	type RowCallbacks,
 } from './components/row.ts';
-import type { TFile } from 'obsidian';
 import Sortable from 'sortablejs';
 import {
-	COLOR_PALETTE,
 	CSS_CLASSES,
 	DATA_ATTRIBUTES,
 	DEBOUNCE_DELAY,
@@ -45,7 +43,16 @@ import {
 } from './constants.ts';
 import type { DebouncedFn } from './utils/debounce.ts';
 import { debounce } from './utils/debounce.ts';
-import { ensureGroupExists, normalizePropertyValue } from './utils/grouping.ts';
+import { parseOpenTasks } from './utils/tasks.ts';
+import { OpenTasksModal } from './openTasksModal.ts';
+import {
+	ensureGroupExists,
+	isListPropertyValue,
+	normalizePropertyValue,
+	normalizePropertyValues,
+	updateListPropertyValue,
+} from './utils/grouping.ts';
+import { getSprintStartDate } from './utils/sprint.ts';
 
 export interface LegacyData {
 	columnOrders: Record<string, string[]>;
@@ -98,12 +105,20 @@ export class KanbanView extends BasesView {
 	private swimlaneByPropertyId: BasesPropertyId | null = null;
 	private cardTitlePropertyId: BasesPropertyId | null = null;
 	private imagePropertyId: BasesPropertyId | null = null;
+	private cardColorPropertyId: BasesPropertyId | null = null;
+	private focusPropertyId: BasesPropertyId | null = null;
+	private sprintStartDateProperty = '';
 	private _columnSortables: Map<string, Sortable> = new Map();
 	private _entryMap: Map<string, BasesEntry> = new Map();
+	private _openTaskCounts = new Map<string, number>();
+	private _taskCountLoads = new Set<string>();
+	private _groupPropertyUsesLists = false;
+	private _groupValues: string[] = [];
+	private _nestedGroups: Map<string, Map<string, BasesEntry[]>> | null = null;
+	private _groupOrder: string[] = [];
 	private swimlaneSortable: Sortable | null = null;
 	private swimlaneColumnSortables: Map<string | null, Sortable> = new Map();
 	private _debouncedRender: DebouncedFn<() => void>;
-	private activeColorPicker: HTMLElement | null = null;
 
 	/**
 	 * In-memory display preferences — the single source of truth during a session.
@@ -122,6 +137,9 @@ export class KanbanView extends BasesView {
 	private _lastImagePropertyId: BasesPropertyId | null | undefined = undefined;
 	private _lastImageFit: string | undefined = undefined;
 	private _lastImageAspectRatio: number | undefined = undefined;
+	private _lastCardColorPropertyId: BasesPropertyId | null | undefined = undefined;
+	private _lastFocusPropertyId: BasesPropertyId | null | undefined = undefined;
+	private _lastSprintStartDateProperty: string | undefined = undefined;
 	private _lastSwimlanePropertyId: BasesPropertyId | null | undefined = undefined;
 	private _lastQuickAddFolder: string | null | undefined = undefined;
 	private _cardFingerprints: Map<string, string> = new Map();
@@ -135,13 +153,13 @@ export class KanbanView extends BasesView {
 		columnOrder: string[];
 		swimlaneOrder: string[];
 		cardOrders: Record<string, string[]>;
-		columnColors: Record<string, string>;
+		collapsedColumns: Set<string>;
 		collapsedLanes: Set<string>;
 	} = {
 		columnOrder: [],
 		swimlaneOrder: [],
 		cardOrders: {},
-		columnColors: {}, // columnValue → colorName
+		collapsedColumns: new Set(),
 		collapsedLanes: new Set(),
 	};
 	private _prefsPropertyId: BasesPropertyId | null = null;
@@ -204,6 +222,25 @@ export class KanbanView extends BasesView {
 				console.error('KanbanView error:', error);
 			}
 		}, DEBOUNCE_DELAY);
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile) this.refreshOpenTaskCount(file);
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				const count = this._openTaskCounts.get(oldPath);
+				if (count !== undefined) this._openTaskCounts.set(file.path, count);
+				this._openTaskCounts.delete(oldPath);
+				this._debouncedRender();
+			}),
+		);
+	}
+
+	private refreshOpenTaskCount(file: TFile): void {
+		if (file.extension !== 'md') return;
+		this._openTaskCounts.delete(file.path);
+		if (this._entryMap.has(file.path)) this.loadOpenTaskCount(file.path);
 	}
 
 	onDataUpdated(): void {
@@ -215,6 +252,11 @@ export class KanbanView extends BasesView {
 		this.swimlaneByPropertyId = this.config.getAsPropertyId('swimlaneByProperty');
 		this.cardTitlePropertyId = this.config.getAsPropertyId('cardTitleProperty');
 		this.imagePropertyId = this.config.getAsPropertyId('imageProperty');
+		this.cardColorPropertyId = this.config.getAsPropertyId('cardColorProperty');
+		this.focusPropertyId = this.config.getAsPropertyId('focusProperty');
+		const configuredSprintStartDateProperty = this.config.get('sprintStartDateProperty');
+		this.sprintStartDateProperty =
+			typeof configuredSprintStartDateProperty === 'string' ? configuredSprintStartDateProperty : '';
 	}
 
 	private triggerHoverPreview(linktext: string, sourcePath: string, event: MouseEvent, targetEl: HTMLElement): void {
@@ -270,19 +312,10 @@ export class KanbanView extends BasesView {
 		const savedCardOrders = allCardOrders[swimlaneScopedKey ?? propertyId] ?? {};
 		this._prefs.cardOrders = Object.fromEntries(Object.entries(savedCardOrders).map(([k, v]) => [k, [...v]]));
 
-		// Column colors — with legacy migration
-		const rawColors = this.config?.get('columnColors');
-		const allColors = isColumnColors(rawColors) ? rawColors : {};
-		let columnColors = allColors[propertyId] ?? null;
-		const legacyColors = this.legacyData?.columnColors[propertyId];
-		if (!columnColors && legacyColors && Object.keys(legacyColors).length > 0) {
-			columnColors = legacyColors;
-			this.config?.set('columnColors', {
-				...allColors,
-				[propertyId]: legacyColors,
-			});
-		}
-		this._prefs.columnColors = columnColors ? { ...columnColors } : {};
+		// Collapsed columns are scoped by the group-by property.
+		const rawCollapsedColumns = this.config?.get('collapsedColumns');
+		const allCollapsedColumns = isStringArrayRecord(rawCollapsedColumns) ? rawCollapsedColumns : {};
+		this._prefs.collapsedColumns = new Set(allCollapsedColumns[propertyId] ?? []);
 
 		// Collapsed swimlanes — scoped by group+swimlane property; default = none
 		// collapsed (lanes start fully expanded so all cards are visible).
@@ -300,7 +333,7 @@ export class KanbanView extends BasesView {
 
 	/**
 	 * Write _prefs back to config. Called only on user actions (drag-drop,
-	 * column remove, color change) — never during renders.
+	 * column remove, or collapse toggle) — never during renders.
 	 *
 	 * Change guards skip config.set() when the value hasn't changed, preventing
 	 * spurious onDataUpdated() triggers.
@@ -332,7 +365,12 @@ export class KanbanView extends BasesView {
 			this._prefs.cardOrders,
 			swimlaneScopedKey ?? this._prefsPropertyId,
 		);
-		this._persistConfigKey('columnColors', isColumnColors, this._prefs.columnColors, this._prefsPropertyId);
+		this._persistConfigKey(
+			'collapsedColumns',
+			isStringArrayRecord,
+			Array.from(this._prefs.collapsedColumns),
+			this._prefsPropertyId,
+		);
 
 		if (swimlaneScopedKey) {
 			this._persistConfigKey('swimlaneOrders', isColumnOrders, this._prefs.swimlaneOrder, swimlaneScopedKey);
@@ -372,6 +410,7 @@ export class KanbanView extends BasesView {
 				this.swimlaneByPropertyId && this.swimlaneByPropertyId !== this.groupByPropertyId
 					? this.swimlaneByPropertyId
 					: null;
+			this._groupOrder = this.parseConfiguredGroupOrder();
 
 			// Reload prefs when either grouping axis changes.
 			const groupChanged = this.groupByPropertyId !== this._prefsPropertyId;
@@ -393,28 +432,43 @@ export class KanbanView extends BasesView {
 
 			// Build path→entry lookup map for O(1) access in handleCardDrop
 			this._entryMap = new Map(entries.map((e: BasesEntry) => [e.file.path, e]));
+			for (const entry of entries) this.loadOpenTaskCount(entry.file.path);
+			this._groupPropertyUsesLists = entries.some((entry) => {
+				try {
+					return this.groupByPropertyId !== null && isListPropertyValue(entry.getValue(this.groupByPropertyId));
+				} catch {
+					return false;
+				}
+			});
 
 			// Group entries — 2D when swimlanes are active, 1D otherwise. The
 			// column-axis preference logic (order, colors, new-value detection)
 			// runs against the union of columns across all lanes, so a single
 			// canonical column ordering is shared by every lane.
-			const groupedByLane = swimlanePropertyId
-				? this.groupEntriesBySwimlaneAndColumn(entries, swimlanePropertyId, this.groupByPropertyId)
+			this._nestedGroups = swimlanePropertyId
+				? this.groupEntriesByColumnAndGroup(entries, this.groupByPropertyId, swimlanePropertyId)
 				: null;
-			const groupedEntries = groupedByLane
-				? this.flattenLanes(groupedByLane)
+			this._groupValues = this._nestedGroups
+				? [
+						...new Set([
+							...this._groupOrder,
+							...Array.from(this._nestedGroups.values()).flatMap((groups) => [...groups.keys()]),
+						]),
+					]
+				: [];
+			const groupedEntries = this._nestedGroups
+				? this.flattenNestedGroups(this._nestedGroups)
 				: this.groupEntriesByProperty(entries, this.groupByPropertyId);
+			const groupedByLane: Map<string, Map<string, BasesEntry[]>> | null = null;
 			const sortActive = this.hasActiveSort();
 
 			// Apply manual card order only when the Base itself is not sorted.
 			// When sorting is active, Bases has already ordered `entries`.
-			if (!sortActive && groupedByLane) {
-				groupedByLane.forEach((columns, laneValue) => {
-					columns.forEach((cellEntries, columnValue) => {
-						const savedOrder = this._prefs.cardOrders[this.cardOrderKey(laneValue, columnValue)];
-						if (savedOrder) {
-							columns.set(columnValue, this.applyCardOrder(cellEntries, savedOrder));
-						}
+			if (!sortActive && this._nestedGroups) {
+				this._nestedGroups.forEach((groups, columnValue) => {
+					groups.forEach((groupEntries, groupValue) => {
+						const savedOrder = this._prefs.cardOrders[this.cardOrderKey(groupValue, columnValue)];
+						if (savedOrder) groups.set(groupValue, this.applyCardOrder(groupEntries, savedOrder));
 					});
 				});
 			} else if (!sortActive) {
@@ -432,16 +486,27 @@ export class KanbanView extends BasesView {
 			const liveValues = Array.from(groupedEntries.keys());
 			const liveValueSet = new Set(liveValues);
 			let shouldPersistColumnOrder = false;
+			const staleValues = this._prefs.columnOrder.filter((value) => !liveValueSet.has(value));
 			if (this._prefs.columnOrder.includes(UNCATEGORIZED_LABEL) && !liveValueSet.has(UNCATEGORIZED_LABEL)) {
 				this._prefs.columnOrder = this._prefs.columnOrder.filter((value) => value !== UNCATEGORIZED_LABEL);
 				shouldPersistColumnOrder = true;
 			}
 			const newValues = liveValues.filter((v) => !this._prefs.columnOrder.includes(v));
 			if (newValues.length > 0) {
-				const isInitialOrder = this._prefs.columnOrder.length === 0;
-				// No prior order — sort alphabetically as the initial ordering
-				this._prefs.columnOrder = isInitialOrder ? [...newValues].sort() : [...this._prefs.columnOrder, ...newValues];
-				shouldPersistColumnOrder = true;
+				// A group value that disappears while another appears is commonly a
+				// renamed note used as a column value. Replace stale empty columns
+				// one-for-one so a file rename does not leave both labels behind.
+				if (staleValues.length === newValues.length && staleValues.length > 0) {
+					const firstIndex = Math.min(...staleValues.map((value) => this._prefs.columnOrder.indexOf(value)));
+					this._prefs.columnOrder = this._prefs.columnOrder.filter((value) => !staleValues.includes(value));
+					this._prefs.columnOrder.splice(firstIndex, 0, ...newValues);
+					shouldPersistColumnOrder = true;
+				} else {
+					const isInitialOrder = this._prefs.columnOrder.length === 0;
+					// No prior order — sort alphabetically as the initial ordering
+					this._prefs.columnOrder = isInitialOrder ? [...newValues].sort() : [...this._prefs.columnOrder, ...newValues];
+					shouldPersistColumnOrder = true;
+				}
 			}
 			if (shouldPersistColumnOrder) {
 				this._persistPrefs();
@@ -474,6 +539,13 @@ export class KanbanView extends BasesView {
 			const imageAspectRatioChanged = currentImageAspectRatio !== this._lastImageAspectRatio;
 			this._lastImageAspectRatio = currentImageAspectRatio;
 
+			const cardColorPropertyChanged = this.cardColorPropertyId !== this._lastCardColorPropertyId;
+			this._lastCardColorPropertyId = this.cardColorPropertyId;
+			const focusPropertyChanged = this.focusPropertyId !== this._lastFocusPropertyId;
+			this._lastFocusPropertyId = this.focusPropertyId;
+			const sprintStartDatePropertyChanged = this.sprintStartDateProperty !== this._lastSprintStartDateProperty;
+			this._lastSprintStartDateProperty = this.sprintStartDateProperty;
+
 			const currentSwimlanePropertyId = swimlanePropertyId;
 			const swimlanePropertyChanged = currentSwimlanePropertyId !== this._lastSwimlanePropertyId;
 			this._lastSwimlanePropertyId = currentSwimlanePropertyId;
@@ -490,6 +562,9 @@ export class KanbanView extends BasesView {
 				imagePropertyChanged ||
 				imageFitChanged ||
 				imageAspectRatioChanged ||
+				cardColorPropertyChanged ||
+				focusPropertyChanged ||
+				sprintStartDatePropertyChanged ||
 				swimlanePropertyChanged ||
 				quickAddFolderChanged;
 
@@ -499,7 +574,7 @@ export class KanbanView extends BasesView {
 			} else {
 				lanes.set(null, groupedEntries);
 			}
-			const hasSwimlanes = groupedByLane !== null;
+			const hasSwimlanes = false;
 			const existingIsSwimlane = existingBoard?.classList.contains(CSS_CLASSES.BOARD_WITH_SWIMLANES) ?? false;
 			const modeChanged = hasSwimlanes !== existingIsSwimlane;
 
@@ -513,7 +588,7 @@ export class KanbanView extends BasesView {
 				orderedValues.filter((value) => (groupedEntries.get(value)?.length ?? 0) === 0),
 			);
 
-			if (!existingBoard || modeChanged || groupChanged || optionsChanged) {
+			if (!existingBoard || modeChanged || groupChanged || optionsChanged || this._nestedGroups !== null) {
 				this.fullRebuild(orderedValues, lanes, hasSwimlanes);
 			} else {
 				this.patchBoard(orderedValues, lanes, hasSwimlanes);
@@ -590,13 +665,20 @@ export class KanbanView extends BasesView {
 			orderedColumnValues.forEach((colValue) => {
 				const colEl = this.createColumn(colValue, colEntries.get(colValue) ?? []);
 				boardEl.appendChild(colEl);
-				const cardBody = colEl.querySelector<HTMLElement>(
-					`.${CSS_CLASSES.COLUMN_BODY}[${DATA_ATTRIBUTES.SORTABLE_CONTAINER}]`,
-				);
-				if (cardBody) this.attachCardSortable(cardBody, this.cardOrderKey(null, colValue));
+				this.attachColumnCardSortables(colEl, colValue, null);
 			});
 			this.swimlaneColumnSortables.set(null, this._createColumnSortable(boardEl));
 		}
+	}
+
+	private attachColumnCardSortables(columnEl: HTMLElement, columnValue: string, laneValue: string | null): void {
+		columnEl
+			.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.COLUMN_BODY}[${DATA_ATTRIBUTES.SORTABLE_CONTAINER}]`)
+			.forEach((body) => {
+				const groupEl = body.closest<HTMLElement>(`.${CSS_CLASSES.COLUMN_GROUP}`);
+				const groupValue = groupEl?.getAttribute(DATA_ATTRIBUTES.INNER_GROUP_VALUE) ?? laneValue;
+				this.attachCardSortable(body, this.cardOrderKey(groupValue, columnValue));
+			});
 	}
 
 	private _buildRowCtx(): RowRenderCtx {
@@ -917,9 +999,9 @@ export class KanbanView extends BasesView {
 		entries.forEach((entry) => {
 			try {
 				const propValue = entry.getValue(propertyId);
-				const value = normalizePropertyValue(propValue);
-				const group = ensureGroupExists(grouped, value);
-				group.push(entry);
+				for (const value of normalizePropertyValues(propValue)) {
+					ensureGroupExists(grouped, value).push(entry);
+				}
 			} catch (error) {
 				console.warn('Error processing entry:', entry.file.path, error);
 				const uncategorizedGroup = ensureGroupExists(grouped, UNCATEGORIZED_LABEL);
@@ -928,6 +1010,45 @@ export class KanbanView extends BasesView {
 		});
 
 		return grouped;
+	}
+
+	private parseConfiguredGroupOrder(): string[] {
+		const raw = this.config?.get('groupOrder');
+		if (typeof raw !== 'string') return [];
+		return raw
+			.split(',')
+			.map((value) => value.trim())
+			.filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+	}
+
+	private groupEntriesByColumnAndGroup(
+		entries: BasesEntry[],
+		columnPropertyId: BasesPropertyId,
+		groupPropertyId: BasesPropertyId,
+	): Map<string, Map<string, BasesEntry[]>> {
+		const grouped = new Map<string, Map<string, BasesEntry[]>>();
+		entries.forEach((entry) => {
+			try {
+				const columns = normalizePropertyValues(entry.getValue(columnPropertyId));
+				const groups = normalizePropertyValues(entry.getValue(groupPropertyId));
+				columns.forEach((columnValue) => {
+					const columnGroups = grouped.get(columnValue) ?? new Map<string, BasesEntry[]>();
+					groups.forEach((groupValue) => ensureGroupExists(columnGroups, groupValue).push(entry));
+					grouped.set(columnValue, columnGroups);
+				});
+			} catch (error) {
+				console.warn('Error processing nested group entry:', entry.file.path, error);
+			}
+		});
+		return grouped;
+	}
+
+	private flattenNestedGroups(nested: Map<string, Map<string, BasesEntry[]>>): Map<string, BasesEntry[]> {
+		const flattened = new Map<string, BasesEntry[]>();
+		nested.forEach((groups, columnValue) => {
+			flattened.set(columnValue, [...groups.values()].flat());
+		});
+		return flattened;
 	}
 
 	/**
@@ -951,19 +1072,19 @@ export class KanbanView extends BasesView {
 
 		entries.forEach((entry) => {
 			let laneKey = UNCATEGORIZED_LABEL;
-			let columnKey = UNCATEGORIZED_LABEL;
+			let columnKeys = [UNCATEGORIZED_LABEL];
 			try {
 				laneKey = normalizePropertyValue(entry.getValue(swimlanePropertyId));
 			} catch (error) {
 				console.warn('Error reading swimlane property for entry:', entry.file.path, error);
 			}
 			try {
-				columnKey = normalizePropertyValue(entry.getValue(columnPropertyId));
+				columnKeys = normalizePropertyValues(entry.getValue(columnPropertyId));
 			} catch (error) {
 				console.warn('Error reading column property for entry:', entry.file.path, error);
 			}
 			const lane = ensureLane(laneKey);
-			ensureGroupExists(lane, columnKey).push(entry);
+			columnKeys.forEach((columnKey) => ensureGroupExists(lane, columnKey).push(entry));
 		});
 
 		return grouped;
@@ -1008,17 +1129,20 @@ export class KanbanView extends BasesView {
 			doc: this.containerEl.doc,
 			card: this._buildCardCtx(),
 			cardCb: this._buildCardCallbacks(),
-			prefs: { columnColors: this._prefs.columnColors },
+			prefs: { collapsedColumns: this._prefs.collapsedColumns },
+			nestedGroups: this._nestedGroups,
+			groupValues: this._groupValues,
+			groupOrder: this._groupOrder,
 			dragging: this._dragging,
 			cardFingerprints: this._cardFingerprints,
 			globallyEmptyColumns: this._globallyEmptyColumns,
+			getColumnSubtitle: (value) => getSprintStartDate(this.app, value, this.sprintStartDateProperty),
 		};
 	}
 
 	private _buildColumnCallbacks(): ColumnCallbacks {
 		return {
-			applyColumnColor: (el, name) => this.applyColumnColor(el, name),
-			onColorPickerClick: (anchor, col, val) => this.openColorPicker(anchor, col, val),
+			onToggleCollapsed: (value, columnEl, toggleBtn) => this.toggleColumnCollapsed(value, columnEl, toggleBtn),
 			onRemoveColumn: (val, el) => this.removeColumn(val, el),
 			createAddButton: (colVal, laneVal) => this.createAddButton(colVal, laneVal),
 			getQuickAddFolder: () => this.getQuickAddFolder(),
@@ -1043,9 +1167,29 @@ export class KanbanView extends BasesView {
 			imageFit: this._lastImageFit ?? 'cover',
 			imageAspectRatio: this._lastImageAspectRatio ?? 0.5,
 			wrapValues: this._lastWrapValue ?? false,
+			cardColorPropertyId: this.cardColorPropertyId,
+			focusPropertyId: this.focusPropertyId,
 			order: this.config?.getOrder() ?? [],
 			getDisplayName: (id) => this.config?.getDisplayName(id) ?? id,
+			getOpenTaskCount: (filePath) => this._openTaskCounts.get(filePath) ?? null,
 		};
+	}
+
+	private loadOpenTaskCount(filePath: string): void {
+		if (this._openTaskCounts.has(filePath) || this._taskCountLoads.has(filePath)) return;
+		const file = this.app.vault.getAbstractFileByPath(filePath);
+		if (!(file instanceof TFile) || file.extension !== 'md') return;
+		this._taskCountLoads.add(filePath);
+		void this.app.vault
+			.read(file)
+			.then((markdown) => {
+				this._openTaskCounts.set(filePath, parseOpenTasks(markdown).length);
+				this._debouncedRender();
+			})
+			.catch((error: unknown) => {
+				console.error('KanbanView: could not count open tasks', error);
+			})
+			.finally(() => this._taskCountLoads.delete(filePath));
 	}
 
 	private _buildCardCallbacks(): CardCallbacks {
@@ -1053,69 +1197,60 @@ export class KanbanView extends BasesView {
 			onHoverPreview: (lt, sp, e, el) => this.triggerHoverPreview(lt, sp, e, el),
 			onSetActiveCard: (path) => this.setActiveCard(path),
 			onOpenInBackgroundTab: (file) => this.openInBackgroundTab(file),
+			onToggleFocus: (entry, focused, cardEl, toggleEl) => {
+				void this.toggleFocus(entry, focused, cardEl, toggleEl);
+			},
+			onOpenTasks: (file) => new OpenTasksModal(this.app, file).open(),
 		};
+	}
+
+	private async toggleFocus(
+		entry: BasesEntry,
+		focused: boolean,
+		cardEl: HTMLElement,
+		toggleEl: HTMLElement,
+	): Promise<void> {
+		if (!this.focusPropertyId) return;
+		const propertyName = parsePropertyId(this.focusPropertyId).name;
+		cardEl.classList.toggle(CSS_CLASSES.CARD_FOCUSED, focused);
+		toggleEl.textContent = focused ? '★' : '☆';
+		toggleEl.classList.toggle('is-active', focused);
+		toggleEl.setAttribute('aria-label', focused ? 'Remove focus' : 'Focus on this now');
+		toggleEl.setAttribute('title', focused ? 'Remove focus' : 'Focus on this now');
+		try {
+			await this.app.fileManager.processFrontMatter(entry.file, (frontmatter: Record<string, unknown>) => {
+				if (focused) frontmatter[propertyName] = true;
+				else delete frontmatter[propertyName];
+			});
+		} catch (error) {
+			cardEl.classList.toggle(CSS_CLASSES.CARD_FOCUSED, !focused);
+			toggleEl.textContent = focused ? '☆' : '★';
+			toggleEl.classList.toggle('is-active', !focused);
+			console.error('Error updating focus property:', error);
+		}
 	}
 
 	private createCard(entry: BasesEntry): HTMLElement {
-		return createCardEl(entry, this._buildCardCtx(), this._buildCardCallbacks());
+		const groupValue = this.groupByPropertyId
+			? normalizePropertyValues(entry.getValue(this.groupByPropertyId))[0]
+			: UNCATEGORIZED_LABEL;
+		const groupValueIsList = this.groupByPropertyId ? isListPropertyValue(entry.getValue(this.groupByPropertyId)) : false;
+		return createCardEl(entry, this._buildCardCtx(), this._buildCardCallbacks(), groupValue, groupValueIsList);
 	}
 
-	private applyColumnColor(columnEl: HTMLElement, colorName: string | null): void {
-		applyColumnColorEl(columnEl, colorName);
-	}
-
-	private openColorPicker(anchorEl: HTMLElement, columnEl: HTMLElement, columnValue: string): void {
-		this.activeColorPicker?.remove();
-		this.activeColorPicker = null;
-
-		const popover = anchorEl.doc.createElement('div');
-		popover.className = CSS_CLASSES.COLUMN_COLOR_POPOVER;
-
-		const currentColor = columnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_COLOR);
-
-		const noneSwatch = anchorEl.doc.createElement('div');
-		noneSwatch.className = `${CSS_CLASSES.COLUMN_COLOR_SWATCH} ${CSS_CLASSES.COLUMN_COLOR_NONE}`;
-		if (!currentColor) noneSwatch.classList.add(CSS_CLASSES.COLUMN_COLOR_SWATCH_ACTIVE);
-		noneSwatch.title = 'No color';
-		noneSwatch.addEventListener('click', () => {
-			this.applyColumnColor(columnEl, null);
-			delete this._prefs.columnColors[columnValue];
-			this._persistPrefs();
-			popover.remove();
-			this.activeColorPicker = null;
+	private toggleColumnCollapsed(columnValue: string, columnEl: HTMLElement, toggleBtn: HTMLElement): void {
+		const willCollapse = !this._prefs.collapsedColumns.has(columnValue);
+		if (willCollapse) this._prefs.collapsedColumns.add(columnValue);
+		else this._prefs.collapsedColumns.delete(columnValue);
+		this.containerEl.querySelectorAll<HTMLElement>(`.${CSS_CLASSES.COLUMN}`).forEach((column) => {
+			if (column.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE) !== columnValue) return;
+			column.classList.toggle(CSS_CLASSES.COLUMN_COLLAPSED, willCollapse);
+			const columnToggle = column.querySelector<HTMLElement>(`.${CSS_CLASSES.COLUMN_TOGGLE}`);
+			if (columnToggle) updateColumnToggleEl(columnToggle, willCollapse);
 		});
-		popover.appendChild(noneSwatch);
-
-		for (const color of COLOR_PALETTE) {
-			const swatch = anchorEl.doc.createElement('div');
-			swatch.className = CSS_CLASSES.COLUMN_COLOR_SWATCH;
-			swatch.style.background = color.cssVar;
-			swatch.title = color.name;
-			if (currentColor === color.name) swatch.classList.add(CSS_CLASSES.COLUMN_COLOR_SWATCH_ACTIVE);
-			swatch.addEventListener('click', () => {
-				this.applyColumnColor(columnEl, color.name);
-				this._prefs.columnColors[columnValue] = color.name;
-				this._persistPrefs();
-				popover.remove();
-				this.activeColorPicker = null;
-			});
-			popover.appendChild(swatch);
-		}
-
-		const rect = anchorEl.getBoundingClientRect();
-		popover.style.top = `${rect.bottom + 4}px`;
-		popover.style.left = `${rect.left}px`;
-		anchorEl.doc.body.appendChild(popover);
-		this.activeColorPicker = popover;
-
-		const dismiss = (e: MouseEvent) => {
-			if (e.target instanceof Node && !popover.contains(e.target) && e.target !== anchorEl) {
-				popover.remove();
-				this.activeColorPicker = null;
-				anchorEl.doc.removeEventListener('click', dismiss);
-			}
-		};
-		anchorEl.doc.addEventListener('click', dismiss);
+		// Keep the directly clicked button covered even if the DOM is being patched.
+		updateColumnToggleEl(toggleBtn, willCollapse);
+		this._persistPrefs();
 	}
 
 	private getQuickAddFolder(): string | null {
@@ -1267,6 +1402,7 @@ export class KanbanView extends BasesView {
 		const oldColumnValue = oldColumnEl?.instanceOf(HTMLElement)
 			? oldColumnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE)
 			: null;
+		const sourceGroupValue = cardEl.getAttribute(DATA_ATTRIBUTES.GROUP_VALUE) ?? oldColumnValue ?? UNCATEGORIZED_LABEL;
 		const newColumnValue = newColumnEl.getAttribute(DATA_ATTRIBUTES.COLUMN_VALUE);
 
 		if (!newColumnValue) {
@@ -1279,15 +1415,19 @@ export class KanbanView extends BasesView {
 			return;
 		}
 
-		// Resolve swimlane axis (if active) from the dragged card's surrounding lanes
-		const swimlaneSelector = `.${CSS_CLASSES.SWIMLANE}`;
-		const oldLaneEl = evt.from.closest(swimlaneSelector);
-		const newLaneEl = evt.to.closest(swimlaneSelector);
+		// Resolve the inner group (or legacy swimlane) from the dragged card's body.
+		const groupSelector = `.${CSS_CLASSES.COLUMN_GROUP}, .${CSS_CLASSES.SWIMLANE}`;
+		const oldLaneEl = evt.from.closest(groupSelector);
+		const newLaneEl = evt.to.closest(groupSelector);
 		const swimlaneActive = newLaneEl?.instanceOf(HTMLElement) ?? false;
 		const oldLaneValue = oldLaneEl?.instanceOf(HTMLElement)
-			? oldLaneEl.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE)
+			? (oldLaneEl.getAttribute(DATA_ATTRIBUTES.INNER_GROUP_VALUE) ??
+				oldLaneEl.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE))
 			: null;
-		const newLaneValue = swimlaneActive ? newLaneEl.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE) : null;
+		const resolvedNewLaneValue = swimlaneActive
+			? (newLaneEl.getAttribute(DATA_ATTRIBUTES.INNER_GROUP_VALUE) ??
+				newLaneEl.getAttribute(DATA_ATTRIBUTES.SWIMLANE_VALUE))
+			: null;
 
 		// Helper: read card paths from a column body element
 		const getColumnPaths = (bodyEl: Element): string[] =>
@@ -1296,11 +1436,11 @@ export class KanbanView extends BasesView {
 				.filter((p): p is string => p !== null);
 
 		const oldKey = this.cardOrderKey(oldLaneValue, oldColumnValue ?? '');
-		const newKey = this.cardOrderKey(newLaneValue, newColumnValue);
+		const newKey = this.cardOrderKey(resolvedNewLaneValue, newColumnValue);
 		const sortActive = this.hasActiveSort();
 
 		// Same cell reorder: update prefs and persist
-		if (oldLaneValue === newLaneValue && oldColumnValue === newColumnValue) {
+		if (oldLaneValue === resolvedNewLaneValue && oldColumnValue === newColumnValue) {
 			if (sortActive) {
 				if (this.didSortableIndexChange(evt)) {
 					new Notice(SORTED_CARD_ORDER_NOTICE, 4000);
@@ -1316,7 +1456,7 @@ export class KanbanView extends BasesView {
 		// Cross-cell drop: capture DOM order for both source and destination
 		if (!sortActive) {
 			if (oldColumnEl?.instanceOf(HTMLElement) && oldColumnValue) {
-				const oldBody = oldColumnEl.querySelector(`.${CSS_CLASSES.COLUMN_BODY}`);
+				const oldBody = evt.from;
 				if (oldBody) this._prefs.cardOrders[oldKey] = getColumnPaths(oldBody);
 			}
 			this._prefs.cardOrders[newKey] = getColumnPaths(evt.to);
@@ -1335,23 +1475,46 @@ export class KanbanView extends BasesView {
 		}
 
 		try {
-			const columnValueToSet = newColumnValue === UNCATEGORIZED_LABEL ? '' : newColumnValue;
 			const columnPropertyName = parsePropertyId(this._prefsPropertyId).name;
+			const rawGroupValue = entry.getValue(this._prefsPropertyId);
+			const updateAsList =
+				cardEl.getAttribute(DATA_ATTRIBUTES.GROUP_VALUE_LIST) === 'true' ||
+				this._groupPropertyUsesLists ||
+				Array.isArray(rawGroupValue);
 
 			const swimlanePropertyId = swimlaneActive ? this._prefsSwimlanePropertyId : null;
 			const swimlaneCrossed =
-				swimlaneActive && swimlanePropertyId !== null && newLaneValue !== null && oldLaneValue !== newLaneValue;
+				swimlaneActive &&
+				swimlanePropertyId !== null &&
+				resolvedNewLaneValue !== null &&
+				oldLaneValue !== resolvedNewLaneValue;
 			const swimlanePropertyName = swimlaneCrossed ? parsePropertyId(swimlanePropertyId).name : null;
-			const swimlaneValueToSet = swimlaneCrossed && newLaneValue !== UNCATEGORIZED_LABEL ? newLaneValue : '';
+			const swimlaneValueToSet =
+				swimlaneCrossed && resolvedNewLaneValue !== UNCATEGORIZED_LABEL ? resolvedNewLaneValue : '';
 
 			await this.app.fileManager.processFrontMatter(entry.file, (frontmatter: Record<string, unknown>) => {
-				if (columnValueToSet === '') {
-					delete frontmatter[columnPropertyName];
+				if (updateAsList) {
+					const rawFrontmatterValue = frontmatter[columnPropertyName];
+					const destinationValue = newColumnValue === UNCATEGORIZED_LABEL ? null : newColumnValue;
+					const values = updateListPropertyValue(rawFrontmatterValue, sourceGroupValue, destinationValue);
+					if (values) frontmatter[columnPropertyName] = values;
+					else delete frontmatter[columnPropertyName];
 				} else {
-					frontmatter[columnPropertyName] = columnValueToSet;
+					if (newColumnValue === UNCATEGORIZED_LABEL) delete frontmatter[columnPropertyName];
+					else frontmatter[columnPropertyName] = newColumnValue;
 				}
 				if (swimlanePropertyName) {
-					if (swimlaneValueToSet === '') {
+					const rawSwimlaneValue = frontmatter[swimlanePropertyName];
+					const swimlaneIsList = Array.isArray(rawSwimlaneValue) || isListPropertyValue(entry.getValue(swimlanePropertyId));
+					if (swimlaneIsList) {
+						const values = updateListPropertyValue(
+							rawSwimlaneValue,
+							oldLaneValue ?? UNCATEGORIZED_LABEL,
+							swimlaneValueToSet || null,
+						);
+						if (values) frontmatter[swimlanePropertyName] = values;
+						else delete frontmatter[swimlanePropertyName];
+					} else if (swimlaneValueToSet === '') {
 						delete frontmatter[swimlanePropertyName];
 					} else {
 						frontmatter[swimlanePropertyName] = swimlaneValueToSet;
@@ -1467,8 +1630,6 @@ export class KanbanView extends BasesView {
 	onClose(): void {
 		this._debouncedRender.cancel();
 		this.destroySortables();
-		this.activeColorPicker?.remove();
-		this.activeColorPicker = null;
 	}
 
 	/**
@@ -1504,11 +1665,17 @@ export class KanbanView extends BasesView {
 				placeholder: 'Select property',
 			},
 			{
-				displayName: 'Swimlane by',
+				displayName: 'Group cards by',
 				type: 'property',
 				key: 'swimlaneByProperty',
 				filter: (prop: string) => !prop.startsWith('file.'),
-				placeholder: 'Optional: horizontal grouping',
+				placeholder: 'Optional: group cards inside columns',
+			},
+			{
+				displayName: 'Group order',
+				type: 'text',
+				key: 'groupOrder',
+				placeholder: 'current, ready-for-dev, uat',
 			},
 			{
 				displayName: 'Add card to column folder',
@@ -1527,6 +1694,26 @@ export class KanbanView extends BasesView {
 				type: 'property',
 				key: 'imageProperty',
 				placeholder: 'Optional: image link property',
+			},
+			{
+				displayName: 'Card color property',
+				type: 'property',
+				key: 'cardColorProperty',
+				filter: (prop: string) => !prop.startsWith('file.'),
+				placeholder: 'Optional: color cards by this property',
+			},
+			{
+				displayName: 'Focus property',
+				type: 'property',
+				key: 'focusProperty',
+				filter: (prop: string) => !prop.startsWith('file.'),
+				placeholder: 'Optional: e.g. focus',
+			},
+			{
+				displayName: 'Sprint start date property',
+				type: 'text',
+				key: 'sprintStartDateProperty',
+				placeholder: 'Optional: e.g. start-date',
 			},
 			{
 				displayName: 'Image fit',

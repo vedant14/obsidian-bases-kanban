@@ -164,6 +164,14 @@ describe('View Options', () => {
 		assert.strictEqual(byKey.imageProperty.displayName, 'Image property');
 		assert.strictEqual(byKey.imageProperty.type, 'property');
 
+		assert.ok(byKey.cardColorProperty, 'cardColorProperty option should exist');
+		assert.strictEqual(byKey.cardColorProperty.displayName, 'Card color property');
+		assert.strictEqual(byKey.cardColorProperty.type, 'property');
+
+		assert.ok(byKey.focusProperty, 'focusProperty option should exist');
+		assert.strictEqual(byKey.focusProperty.displayName, 'Focus property');
+		assert.strictEqual(byKey.focusProperty.type, 'property');
+
 		assert.ok(byKey.imageFit, 'imageFit option should exist');
 		assert.strictEqual(byKey.imageFit.displayName, 'Image fit');
 		assert.strictEqual(byKey.imageFit.type, 'dropdown');

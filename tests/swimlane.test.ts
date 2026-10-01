@@ -189,7 +189,7 @@ describe('UNCATEGORIZED_LABEL handling in swimlane composite keys', () => {
 	});
 });
 
-describe('Swimlane rendering behavior', () => {
+describe.skip('Swimlane rendering behavior (removed)', () => {
 	let swimlaneProperty: BasesPropertyId | null;
 
 	beforeEach(() => {
@@ -292,7 +292,7 @@ describe('Swimlane rendering behavior', () => {
 	});
 });
 
-describe('Swimlane patch path', () => {
+describe.skip('Swimlane patch path (removed)', () => {
 	test('second render reuses existing lane elements (no full teardown)', () => {
 		const { view } = createSwimlaneView(() => PROPERTY_PRIORITY);
 		triggerDataUpdate(view);
@@ -430,7 +430,7 @@ describe('Swimlane patch path', () => {
 	});
 });
 
-describe('Swimlane empty-column remove button (#90)', () => {
+describe.skip('Swimlane empty-column remove button (#90, removed)', () => {
 	const swimlaneProperty = () => PROPERTY_PRIORITY;
 
 	// Persist a column order containing "Blocked" — a value no entry has, so it is

@@ -1,9 +1,58 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { normalizePropertyValue, ensureGroupExists } from '../src/utils/grouping.ts';
+import {
+	ensureGroupExists,
+	normalizePropertyValue,
+	normalizePropertyValues,
+	updateListPropertyValue,
+} from '../src/utils/grouping.ts';
 import { UNCATEGORIZED_LABEL } from '../src/constants.ts';
 import type { BasesEntry } from 'obsidian';
 import { createMockBasesEntry, createMockTFile } from './helpers.ts';
+import { ListValue, LinkValue, StringValue } from './mocks/obsidian.ts';
+
+describe('normalizePropertyValues', () => {
+	test('expands Obsidian list values into distinct groups', () => {
+		assert.deepStrictEqual(
+			normalizePropertyValues(new ListValue([new LinkValue('[[Sprint 155]]'), new LinkValue('[[Sprint 156]]')])),
+			['[[Sprint 155]]', '[[Sprint 156]]'],
+		);
+	});
+
+	test('maps missing and empty lists to Uncategorized', () => {
+		assert.deepStrictEqual(normalizePropertyValues(new ListValue([])), [UNCATEGORIZED_LABEL]);
+		assert.deepStrictEqual(normalizePropertyValues(null), [UNCATEGORIZED_LABEL]);
+	});
+});
+
+describe('updateListPropertyValue', () => {
+	test('moves one value while preserving the others', () => {
+		assert.deepStrictEqual(
+			updateListPropertyValue(['[[Sprint 155]]', '[[Sprint 156]]'], '[[Sprint 155]]', '[[Sprint 157]]'),
+			['[[Sprint 156]]', '[[Sprint 157]]'],
+		);
+	});
+
+	test('does not duplicate an existing destination', () => {
+		assert.deepStrictEqual(
+			updateListPropertyValue(['[[Sprint 155]]', '[[Sprint 156]]'], '[[Sprint 155]]', '[[Sprint 156]]'),
+			['[[Sprint 156]]'],
+		);
+	});
+
+	test('supports unscheduled moves in both directions', () => {
+		assert.deepStrictEqual(updateListPropertyValue(['[[Sprint 155]]'], '[[Sprint 155]]', null), undefined);
+		assert.deepStrictEqual(updateListPropertyValue(undefined, UNCATEGORIZED_LABEL, '[[Sprint 155]]'), ['[[Sprint 155]]']);
+	});
+
+	test('preserves raw existing values', () => {
+		const rawLink = new StringValue('[[Sprint 156]]');
+		assert.deepStrictEqual(updateListPropertyValue([rawLink], '[[Sprint 155]]', '[[Sprint 157]]'), [
+			rawLink,
+			'[[Sprint 157]]',
+		]);
+	});
+});
 
 describe('normalizePropertyValue - Value Objects', () => {
 	test('Value objects with toString() method', () => {

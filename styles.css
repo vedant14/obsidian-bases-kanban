@@ -240,7 +240,6 @@
 
 /* Kanban Column */
 .obk-column {
-	--obk-column-accent-color: transparent;
 	flex: 0 0 clamp(200px, 60cqw, 280px);
 	display: flex;
 	flex-direction: column;
@@ -254,92 +253,13 @@
 
 .obk-column-header {
 	padding: 12px 16px;
-	background: color-mix(in srgb, var(--obk-column-accent-color, transparent) 15%, var(--background-primary-alt));
+	background: var(--background-primary-alt);
 	border-bottom: 1px solid var(--background-modifier-border);
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
 	flex-shrink: 0;
 	gap: 8px;
-}
-
-/* Column color picker button */
-.obk-column-color-btn {
-	width: 16px;
-	height: 16px;
-	border-radius: 50%;
-	border: 2px solid var(--background-modifier-border);
-	background: var(--obk-column-accent-color, transparent);
-	cursor: pointer;
-	flex-shrink: 0;
-	transition:
-		transform 0.1s ease,
-		border-color 0.1s ease;
-}
-
-.obk-column-color-btn:hover {
-	border-color: var(--text-muted);
-	transform: scale(1.15);
-}
-
-/* Color picker popover */
-.obk-column-color-popover {
-	position: fixed;
-	background: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 8px;
-	padding: 8px;
-	display: flex;
-	gap: 6px;
-	flex-wrap: wrap;
-	width: 164px;
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-	z-index: 100;
-}
-
-.obk-column-color-swatch {
-	width: 20px;
-	height: 20px;
-	border-radius: 50%;
-	cursor: pointer;
-	border: 2px solid transparent;
-	transition:
-		transform 0.1s ease,
-		border-color 0.1s ease;
-}
-
-.obk-column-color-swatch:hover {
-	transform: scale(1.2);
-}
-
-.obk-column-color-swatch--active {
-	border-color: var(--text-normal);
-}
-
-.obk-column-color-none {
-	background: var(--background-modifier-border);
-	position: relative;
-}
-
-.obk-column-color-none::before,
-.obk-column-color-none::after {
-	content: "";
-	position: absolute;
-	top: 50%;
-	left: 50%;
-	width: 10px;
-	height: 1.5px;
-	background: var(--text-muted);
-	border-radius: 1px;
-	transform-origin: center;
-}
-
-.obk-column-color-none::before {
-	transform: translate(-50%, -50%) rotate(45deg);
-}
-
-.obk-column-color-none::after {
-	transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .obk-column-drag-handle {
@@ -371,12 +291,125 @@
 	text-transform: capitalize;
 }
 
+.obk-column-heading {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.obk-column-subtitle {
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--text-muted);
+	text-transform: none;
+}
+
 .obk-column-count {
 	font-size: 12px;
 	color: var(--text-muted);
-	background: color-mix(in srgb, var(--obk-column-accent-color, transparent) 15%, var(--background-modifier-border));
+	background: var(--background-modifier-border);
 	padding: 2px 8px;
 	border-radius: 12px;
+}
+
+.obk-column-group {
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.obk-column-group:last-child {
+	border-bottom: 0;
+}
+
+.obk-column-group-title {
+	padding: 8px 12px 4px;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	font-size: 12px;
+	font-weight: 600;
+	font-style: italic;
+	color: var(--text-normal);
+}
+
+.obk-column-group-count {
+	font-size: 11px;
+	font-style: normal;
+	font-weight: 400;
+	color: var(--text-muted);
+}
+
+.obk-column-group-body {
+	max-height: none;
+}
+
+.obk-column-toggle {
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: 4px;
+	color: var(--text-muted);
+	background: transparent;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.obk-column-toggle:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-border-hover);
+}
+
+.obk-column--collapsed {
+	flex: 0 0 64px;
+	width: 64px;
+	min-width: 64px;
+	min-height: 0;
+	max-height: max-content;
+	align-self: flex-start;
+}
+
+.obk-column--collapsed .obk-column-header {
+	min-height: 150px;
+	padding: 8px 4px;
+	flex-direction: column;
+	justify-content: flex-start;
+	gap: 8px;
+}
+
+.obk-column--collapsed .obk-column-title {
+	flex: 1 1 auto;
+	min-height: 70px;
+	font-size: 12px;
+	text-align: center;
+	writing-mode: vertical-rl;
+	transform: rotate(180deg);
+}
+
+.obk-column--collapsed .obk-column-heading {
+	flex: 1 1 auto;
+	min-height: 70px;
+	align-items: center;
+}
+
+.obk-column--collapsed .obk-column-subtitle {
+	display: none;
+}
+
+.obk-column--collapsed .obk-column-count {
+	display: none;
+}
+
+.obk-column--collapsed .obk-column-body {
+	display: none;
+}
+
+.obk-column--collapsed .obk-column-group {
+	display: none;
 }
 
 .obk-column-add-btn,
@@ -451,13 +484,201 @@
 /* Kanban Card */
 .obk-card {
 	background: var(--background-primary);
-	border: 1px solid
-		color-mix(in srgb, var(--obk-column-accent-color, transparent) 15%, var(--background-modifier-border));
-	border-radius: 6px;
-	padding: 12px;
+	border: 1px solid color-mix(in srgb, var(--background-modifier-border) 72%, transparent);
+	border-radius: 10px;
+	padding: 14px;
 	cursor: pointer;
-	transition: all 0.2s ease;
-	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+	transition:
+		border-color 140ms ease,
+		box-shadow 140ms ease,
+		transform 140ms ease;
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.045);
+}
+
+.obk-card:hover {
+	border-color: var(--background-modifier-border-hover);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.075);
+}
+
+.obk-card-title-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.obk-card-title-row .obk-card-title {
+	flex: 1;
+}
+
+.obk-card-actions {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	transition: opacity 120ms ease;
+}
+
+.obk-card-actions .obk-card-action:not(.obk-card-task-count) {
+	opacity: 0;
+}
+
+.obk-card:hover .obk-card-actions,
+.obk-card--active .obk-card-actions,
+.obk-card:focus-within .obk-card-actions {
+	opacity: 1;
+}
+
+.obk-card:hover .obk-card-actions .obk-card-action,
+.obk-card--active .obk-card-actions .obk-card-action,
+.obk-card:focus-within .obk-card-actions .obk-card-action {
+	opacity: 1;
+}
+
+.obk-card-action {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 30px;
+	height: 30px;
+	padding: 0;
+	border: 0;
+	border-radius: 6px;
+	background: transparent !important;
+	color: var(--text-muted);
+	cursor: pointer;
+	font-size: 16px;
+	line-height: 1;
+}
+
+.obk-card-task-count {
+	width: auto;
+	min-width: 27px;
+	height: 24px;
+	padding: 0 7px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background: var(--background-secondary) !important;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+}
+
+.obk-card-task-count:hover {
+	background: var(--background-modifier-hover) !important;
+	color: var(--text-normal);
+}
+
+.obk-card-action:hover,
+.obk-card-action.is-active {
+	background: var(--background-modifier-hover) !important;
+	color: var(--interactive-accent);
+}
+
+.obk-card--focused {
+	background-color: rgba(255, 224, 102, 0.14);
+	background-color: color-mix(in srgb, var(--color-yellow) 14%, var(--background-primary));
+}
+
+.obk-card--color-red {
+	border-left: 4px solid var(--color-red);
+}
+.obk-card--color-orange {
+	border-left: 4px solid var(--color-orange);
+}
+.obk-card--color-yellow {
+	border-left: 4px solid var(--color-yellow);
+}
+.obk-card--color-green {
+	border-left: 4px solid var(--color-green);
+}
+.obk-card--color-cyan {
+	border-left: 4px solid var(--color-cyan);
+}
+.obk-card--color-blue {
+	border-left: 4px solid var(--color-blue);
+}
+.obk-card--color-purple {
+	border-left: 4px solid var(--color-purple);
+}
+.obk-card--color-pink {
+	border-left: 4px solid var(--color-pink);
+}
+
+.obk-task-form {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.obk-task-input {
+	width: 100%;
+}
+
+.obk-task-actions {
+	margin-top: 10px;
+	padding-top: 12px;
+	border-top: 1px solid var(--background-modifier-border);
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.obk-open-tasks-modal {
+	width: min(620px, calc(100vw - 40px));
+}
+
+.obk-open-tasks-modal .modal-title {
+	font-size: var(--font-ui-large);
+}
+
+.obk-task-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: 60vh;
+	overflow-y: auto;
+}
+
+.obk-task-summary {
+	margin-bottom: 8px;
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+}
+
+.obk-task-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 9px 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	border-radius: 5px;
+}
+
+.obk-task-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.obk-task-checkbox {
+	margin-top: 3px;
+}
+
+.obk-task-text {
+	flex: 1;
+}
+
+.obk-task-due {
+	display: inline-flex;
+	align-items: center;
+	color: var(--text-muted);
+	font-size: var(--font-smaller);
+	white-space: nowrap;
+}
+
+.obk-task-empty {
+	padding: 20px 8px;
+	color: var(--text-muted);
+	text-align: center;
 }
 
 /* targets touch-first devices (tablets, phones) to make the kanban genuinely usable on
@@ -510,10 +731,10 @@
 }
 
 .obk-card-title {
-	font-weight: 500;
-	font-size: 14px;
+	font-weight: 600;
+	font-size: var(--font-ui-small);
 	color: var(--text-normal);
-	line-height: 1.4;
+	line-height: 1.45;
 	word-wrap: break-word;
 }
 
@@ -535,8 +756,9 @@
 	white-space: nowrap;
 	text-overflow: ellipsis;
 	display: flex;
-	gap: 6px;
-	margin-top: 4px;
+	gap: 8px;
+	margin-top: 8px;
+	line-height: 1.4;
 }
 
 .obk-card-property-wrap {

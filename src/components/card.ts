@@ -1,7 +1,7 @@
 import type { App, BasesEntry, BasesPropertyId } from 'obsidian';
 import { Keymap, NullValue } from 'obsidian';
 import type { TFile } from 'obsidian';
-import { CSS_CLASSES, DATA_ATTRIBUTES } from '../constants.ts';
+import { CSS_CLASSES, DATA_ATTRIBUTES, getCardColorName } from '../constants.ts';
 
 export interface CardRenderCtx {
 	app: App;
@@ -12,14 +12,19 @@ export interface CardRenderCtx {
 	imageFit: string;
 	imageAspectRatio: number;
 	wrapValues: boolean;
+	cardColorPropertyId: BasesPropertyId | null;
+	focusPropertyId: BasesPropertyId | null;
 	order: BasesPropertyId[];
 	getDisplayName: (id: BasesPropertyId) => string;
+	getOpenTaskCount: (filePath: string) => number | null;
 }
 
 export interface CardCallbacks {
 	onHoverPreview: (linktext: string, sourcePath: string, event: MouseEvent, targetEl: HTMLElement) => void;
 	onSetActiveCard: (path: string | null) => void;
 	onOpenInBackgroundTab: (file: TFile) => void;
+	onToggleFocus: (entry: BasesEntry, focused: boolean, cardEl: HTMLElement, toggleEl: HTMLElement) => void;
+	onOpenTasks: (file: TFile) => void;
 }
 
 export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): string {
@@ -35,6 +40,14 @@ export function computeCardFingerprint(entry: BasesEntry, ctx: CardRenderCtx): s
 	}
 	if (ctx.imagePropertyId) {
 		const val = entry.getValue(ctx.imagePropertyId);
+		parts.push(val === null ? '' : val.toString());
+	}
+	if (ctx.cardColorPropertyId) {
+		const val = entry.getValue(ctx.cardColorPropertyId);
+		parts.push(val === null ? '' : val.toString());
+	}
+	if (ctx.focusPropertyId) {
+		const val = entry.getValue(ctx.focusPropertyId);
 		parts.push(val === null ? '' : val.toString());
 	}
 	return parts.join('\x00');
@@ -87,11 +100,36 @@ export function renderCardCover(
 	return true;
 }
 
-export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallbacks): HTMLElement {
+export function createCard(
+	entry: BasesEntry,
+	ctx: CardRenderCtx,
+	cb: CardCallbacks,
+	groupValue: string,
+	groupValueIsList: boolean,
+): HTMLElement {
 	const cardEl = ctx.doc.createElement('div');
 	cardEl.className = CSS_CLASSES.CARD;
 	const filePath = entry.file.path;
 	cardEl.setAttribute(DATA_ATTRIBUTES.ENTRY_PATH, filePath);
+	cardEl.setAttribute(DATA_ATTRIBUTES.GROUP_VALUE, groupValue);
+	cardEl.setAttribute(DATA_ATTRIBUTES.GROUP_VALUE_LIST, String(groupValueIsList));
+
+	if (ctx.cardColorPropertyId) {
+		const value = entry.getValue(ctx.cardColorPropertyId);
+		if (value && !(value instanceof NullValue) && value.toString().trim()) {
+			cardEl.classList.add(`${CSS_CLASSES.CARD_COLOR_PREFIX}${getCardColorName(value.toString())}`);
+		}
+	}
+
+	const isFocused = (): boolean => {
+		if (!ctx.focusPropertyId) return false;
+		const value = entry.getValue(ctx.focusPropertyId);
+		if (!value || value instanceof NullValue) return false;
+		const raw = value.toString().trim().toLowerCase();
+		return raw === 'true' || raw === 'yes' || raw === '1' || raw === 'on';
+	};
+	const focused = isFocused();
+	if (focused) cardEl.classList.add(CSS_CLASSES.CARD_FOCUSED);
 
 	if (ctx.imagePropertyId) {
 		const coverEl = cardEl.createDiv({ cls: CSS_CLASSES.CARD_COVER });
@@ -103,8 +141,41 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 		if (!rendered) coverEl.remove();
 	}
 
-	const titleEl = cardEl.createDiv({ cls: CSS_CLASSES.CARD_TITLE });
+	const titleRow = cardEl.createDiv({ cls: CSS_CLASSES.CARD_TITLE_ROW });
+	const titleEl = titleRow.createDiv({ cls: CSS_CLASSES.CARD_TITLE });
 	renderCardTitle(titleEl, entry, ctx);
+	const actionsEl = titleRow.createDiv({ cls: CSS_CLASSES.CARD_ACTIONS });
+	const openTaskCount = ctx.getOpenTaskCount(filePath);
+	if (ctx.focusPropertyId) {
+		const focusBtn = actionsEl.createEl('button', {
+			cls: CSS_CLASSES.CARD_ACTION,
+			text: focused ? '★' : '☆',
+			attr: {
+				type: 'button',
+				'aria-label': focused ? 'Remove focus' : 'Focus on this now',
+				title: focused ? 'Remove focus' : 'Focus on this now',
+			},
+		});
+		focusBtn.classList.toggle('is-active', focused);
+		focusBtn.addEventListener('click', (event) => {
+			event.stopPropagation();
+			cb.onToggleFocus(entry, !cardEl.classList.contains(CSS_CLASSES.CARD_FOCUSED), cardEl, focusBtn);
+		});
+	}
+	const openTasksBtn = actionsEl.createEl('button', {
+		cls: `${CSS_CLASSES.CARD_ACTION} ${CSS_CLASSES.CARD_TASK_COUNT}`,
+		text: `${openTaskCount ?? '…'}`,
+		attr: {
+			type: 'button',
+			'aria-label':
+				openTaskCount === null ? 'Open task count loading; show open tasks' : `${openTaskCount} open tasks; show tasks`,
+			title: openTaskCount === null ? 'Loading open task count' : `${openTaskCount} open tasks`,
+		},
+	});
+	openTasksBtn.addEventListener('click', (event) => {
+		event.stopPropagation();
+		cb.onOpenTasks(entry.file);
+	});
 
 	for (const propertyId of ctx.order) {
 		if (propertyId === ctx.groupByPropertyId) continue;
@@ -142,7 +213,11 @@ export function createCard(entry: BasesEntry, ctx: CardRenderCtx, cb: CardCallba
 			cb.onOpenInBackgroundTab(entry.file);
 			return;
 		}
-		void ctx.app.workspace.openLinkText(filePath, '', Keymap.isModEvent(e));
+		if (Keymap.isModEvent(e)) {
+			void ctx.app.workspace.openLinkText(filePath, '', true);
+			return;
+		}
+		void ctx.app.workspace.openLinkText(filePath, '', false);
 	};
 	cardEl.addEventListener('click', clickHandler);
 	cardEl.addEventListener('auxclick', clickHandler);

@@ -32,9 +32,11 @@ export const SORTED_CARD_ORDER_NOTICE = '⚠️ Sort is active. Clear it to manu
 export const DATA_ATTRIBUTES = {
 	COLUMN_VALUE: 'data-column-value',
 	ENTRY_PATH: 'data-entry-path',
+	GROUP_VALUE: 'data-group-value',
+	GROUP_VALUE_LIST: 'data-group-value-list',
+	INNER_GROUP_VALUE: 'data-inner-group-value',
 	SORTABLE_CONTAINER: 'data-sortable-container',
 	COLUMN_POSITION: 'data-column-position',
-	COLUMN_COLOR: 'data-column-color',
 	SWIMLANE_VALUE: 'data-swimlane-value',
 } as const;
 
@@ -73,15 +75,29 @@ export const CSS_CLASSES = {
 	COLUMN: 'obk-column',
 	COLUMN_HEADER: 'obk-column-header',
 	COLUMN_TITLE: 'obk-column-title',
+	COLUMN_HEADING: 'obk-column-heading',
+	COLUMN_SUBTITLE: 'obk-column-subtitle',
 	COLUMN_COUNT: 'obk-column-count',
 	COLUMN_BODY: 'obk-column-body',
 	COLUMN_DRAG_HANDLE: 'obk-column-drag-handle',
 	COLUMN_DRAGGING: 'obk-column-dragging',
 	COLUMN_GHOST: 'obk-column-ghost',
 	COLUMN_ADD_BTN: 'obk-column-add-btn',
+	COLUMN_TOGGLE: 'obk-column-toggle',
+	COLUMN_COLLAPSED: 'obk-column--collapsed',
+	COLUMN_GROUP: 'obk-column-group',
+	COLUMN_GROUP_TITLE: 'obk-column-group-title',
+	COLUMN_GROUP_COUNT: 'obk-column-group-count',
+	COLUMN_GROUP_BODY: 'obk-column-group-body',
 
 	// Card
 	CARD: 'obk-card',
+	CARD_TITLE_ROW: 'obk-card-title-row',
+	CARD_ACTIONS: 'obk-card-actions',
+	CARD_ACTION: 'obk-card-action',
+	CARD_TASK_COUNT: 'obk-card-task-count',
+	CARD_FOCUSED: 'obk-card--focused',
+	CARD_COLOR_PREFIX: 'obk-card--color-',
 	CARD_TITLE: 'obk-card-title',
 	CARD_PREVIEW: 'obk-card-preview',
 	CARD_COVER: 'obk-card-cover',
@@ -110,14 +126,47 @@ export const CSS_CLASSES = {
 	QUICK_ADD_FORM: 'obk-quick-add-form',
 	QUICK_ADD_INPUT: 'obk-quick-add-input',
 	QUICK_ADD_ACTIONS: 'obk-quick-add-actions',
-
-	// Color picker
-	COLUMN_COLOR_BTN: 'obk-column-color-btn',
-	COLUMN_COLOR_POPOVER: 'obk-column-color-popover',
-	COLUMN_COLOR_SWATCH: 'obk-column-color-swatch',
-	COLUMN_COLOR_SWATCH_ACTIVE: 'obk-column-color-swatch--active',
-	COLUMN_COLOR_NONE: 'obk-column-color-none',
+	TASK_FORM: 'obk-task-form',
+	TASK_INPUT: 'obk-task-input',
+	TASK_ACTIONS: 'obk-task-actions',
+	TASK_LIST: 'obk-task-list',
+	TASK_ROW: 'obk-task-row',
+	TASK_CHECKBOX: 'obk-task-checkbox',
+	TASK_TEXT: 'obk-task-text',
+	TASK_DUE: 'obk-task-due',
+	TASK_EMPTY: 'obk-task-empty',
+	TASK_SUMMARY: 'obk-task-summary',
 } as const;
+
+export const CARD_COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple', 'pink'] as const;
+export type CardColorName = (typeof CARD_COLOR_NAMES)[number];
+
+/** Stable semantic colors for common project/priority values, with a hash fallback. */
+export function getCardColorName(value: string): CardColorName {
+	const normalized = value.trim().toLowerCase();
+	const semantic: Record<string, CardColorName> = {
+		blocked: 'red',
+		urgent: 'red',
+		critical: 'red',
+		xl: 'red',
+		high: 'orange',
+		large: 'orange',
+		medium: 'yellow',
+		inprogress: 'yellow',
+		current: 'yellow',
+		low: 'green',
+		small: 'green',
+		done: 'green',
+		complete: 'green',
+		backlog: 'blue',
+		feature: 'purple',
+		bug: 'red',
+	};
+	if (semantic[normalized]) return semantic[normalized];
+	let hash = 0;
+	for (let index = 0; index < normalized.length; index++) hash = (hash * 31 + normalized.charCodeAt(index)) | 0;
+	return CARD_COLOR_NAMES[Math.abs(hash) % CARD_COLOR_NAMES.length];
+}
 
 /** Sortable.js configuration constants */
 export const SORTABLE_CONFIG = {
